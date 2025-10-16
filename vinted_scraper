@@ -1,0 +1,50 @@
+from pyVinted import Vinted
+import asyncio
+from typing import List, Dict
+
+class VintedScraper:
+    def __init__(self):
+        self.vinted = Vinted()
+    
+    async def search_items(self, query: str = 't-shirt', limit: int = 10) -> List[Dict]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._search_items_sync, query, limit)
+    
+    def _search_items_sync(self, query: str, limit: int) -> List[Dict]:
+        items = []
+        
+        try:
+            search_url = f"https://www.vinted.fr/vetements?search_text={query.replace(' ', '+')}&order=newest_first"
+            
+            vinted_items = self.vinted.items.search(search_url, limit, 1)
+            
+            for vinted_item in vinted_items:
+                image_url = None
+                if hasattr(vinted_item, 'photo') and vinted_item.photo:
+                    if isinstance(vinted_item.photo, str):
+                        image_url = vinted_item.photo
+                    elif hasattr(vinted_item.photo, 'url'):
+                        image_url = vinted_item.photo.url
+                    elif hasattr(vinted_item.photo, 'full_size_url'):
+                        image_url = vinted_item.photo.full_size_url
+                
+                status = None
+                if hasattr(vinted_item, 'raw_data') and 'status' in vinted_item.raw_data:
+                    status = vinted_item.raw_data['status']
+                
+                item = {
+                    'id': str(vinted_item.id),
+                    'title': vinted_item.title,
+                    'price': f"{vinted_item.price} {vinted_item.currency}",
+                    'url': vinted_item.url,
+                    'image': image_url,
+                    'size': vinted_item.size_title if hasattr(vinted_item, 'size_title') else None,
+                    'brand': vinted_item.brand_title if hasattr(vinted_item, 'brand_title') else None,
+                    'status': status
+                }
+                items.append(item)
+            
+        except Exception as e:
+            print(f'Error searching Vinted: {e}')
+        
+        return items
