@@ -1,0 +1,228 @@
+import discord
+from discord.ext import commands, tasks
+import os
+from dotenv import load_dotenv
+from vinted_scraper import VintedScraper
+import asyncio
+import json
+
+load_dotenv()
+
+TOKEN = ""  # os.getenv('DISCORD_BOT_TOKEN')
+
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+scraper = VintedScraper()
+channel_configs = {}
+posted_items = {}
+CONFIG_FILE = 'channel_config.json'
+
+
+def load_config():
+    global channel_configs
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                channel_configs = {int(k): v for k, v in json.load(f).items()}
+    except Exception as e:
+        print(f'Error loading config: {e}')
+        channel_configs = {}
+
+
+def save_config():
+    try:
+        with open(CONFIG_FILE, 'w') as f:
+            json.dump({
+                str(k): v
+                for k, v in channel_configs.items()
+            },
+                      f,
+                      indent=2)
+    except Exception as e:
+        print(f'Error saving config: {e}')
+
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+    print(f'Bot is in {len(bot.guilds)} guilds')
+    load_config()
+    if channel_configs and not check_vinted.is_running():
+        check_vinted.start()
+
+
+@bot.command(name='setup')
+async def setup_channel(ctx, *, brand: str):
+    """Configure ce canal pour surveiller une marque spécifique"""
+    channel_id = ctx.channel.id
+    channel_configs[channel_id] = {
+        'brand': brand,
+        'channel_name': ctx.channel.name
+    }
+    save_config()
+
+    if channel_id not in posted_items:
+        posted_items[channel_id] = set()
+
+    if not check_vinted.is_running():
+        check_vinted.start()
+
+    await ctx.send(
+        f'✅ Ce canal va maintenant surveiller les **{brand}** sur Vinted!\nLe bot vérifie chaque minute.'
+    )
+
+
+@bot.command(name='remove')
+async def remove_channel(ctx):
+    """Arrête la surveillance sur ce canal"""
+    channel_id = ctx.channel.id
+    if channel_id in channel_configs:
+        brand = channel_configs[channel_id]['brand']
+        del channel_configs[channel_id]
+        save_config()
+        await ctx.send(f'❌ Surveillance de **{brand}** arrêtée sur ce canal.')
+
+        if not channel_configs and check_vinted.is_running():
+            check_vinted.cancel()
+    else:
+        await ctx.send('Ce canal n\'est pas configuré pour surveiller Vinted.')
+
+
+@bot.command(name='list')
+async def list_channels(ctx):
+    """Liste tous les canaux configurés"""
+    if not channel_configs:
+        await ctx.send('Aucun canal n\'est configuré pour le moment.')
+        return
+
+    embed = discord.Embed(title='📋 Canaux configurés',
+                          color=discord.Color.green())
+
+    for channel_id, config in channel_configs.items():
+        channel = bot.get_channel(channel_id)
+        if channel:
+            embed.add_field(name=f'#{config["channel_name"]}',
+                            value=f'Marque: **{config["brand"]}**',
+                            inline=False)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name='search')
+async def search_now(ctx, *, query: str = 't-shirt'):
+    """Recherche instantanée sur Vinted"""
+    await ctx.send(f'🔍 Recherche sur Vinted: {query}...')
+    items = await scraper.search_items(query)
+
+    if not items:
+        await ctx.send('❌ Aucun article trouvé.')
+        return
+
+    await ctx.send(
+        f'✅ {len(items)} articles trouvés (affichage des 5 premiers):')
+    for item in items[:5]:
+        embed = create_item_embed(item)
+        await ctx.send(embed=embed)
+        await asyncio.sleep(1)
+
+
+@tasks.loop(minutes=1)
+async def check_vinted():
+    """Vérifie Vinted pour tous les canaux configurés"""
+    for channel_id, config in list(channel_configs.items()):
+        try:
+            channel = bot.get_channel(channel_id)
+            if not channel or not hasattr(channel, 'send'):
+                continue
+
+            brand = config['brand']
+            items = await scraper.search_items(brand, limit=10)
+
+            if channel_id not in posted_items:
+                posted_items[channel_id] = set()
+
+            new_items = 0
+            for item in items:
+                item_id = item.get('id')
+                if item_id and item_id not in posted_items[channel_id]:
+                    embed = create_item_embed(item)
+                    await channel.send(embed=embed)
+                    posted_items[channel_id].add(item_id)
+                    new_items += 1
+                    await asyncio.sleep(2)
+
+            if new_items > 0:
+                print(
+                    f'Posted {new_items} new items for {brand} in #{config["channel_name"]}'
+                )
+
+        except Exception as e:
+            print(f'Error checking Vinted for channel {channel_id}: {e}')
+
+
+def create_item_embed(item):
+    embed = discord.Embed(title=item.get('title', 'Sans titre'),
+                          url=item.get('url', ''),
+                          color=discord.Color.blue())
+
+    if item.get('price'):
+        embed.add_field(name='💰 Prix', value=item['price'], inline=True)
+
+    if item.get('size'):
+        embed.add_field(name='📏 Taille', value=item['size'], inline=True)
+
+    if item.get('brand'):
+        embed.add_field(name='🏷️ Marque', value=item['brand'], inline=True)
+
+    if item.get('status'):
+        embed.add_field(name='✨ État', value=item['status'], inline=True)
+
+    if item.get('image'):
+        embed.set_thumbnail(url=item['image'])
+
+    return embed
+
+
+@bot.command(name='aide')
+async def help_command(ctx):
+    """Affiche l'aide"""
+    embed = discord.Embed(
+        title='🤖 Commandes du Bot Vinted',
+        description='Voici toutes les commandes disponibles:',
+        color=discord.Color.blue())
+
+    embed.add_field(
+        name='!setup <marque>',
+        value=
+        'Configure ce canal pour surveiller une marque\nExemple: `!setup nike`',
+        inline=False)
+
+    embed.add_field(name='!remove',
+                    value='Arrête la surveillance sur ce canal',
+                    inline=False)
+
+    embed.add_field(name='!list',
+                    value='Liste tous les canaux configurés',
+                    inline=False)
+
+    embed.add_field(
+        name='!search <recherche>',
+        value=
+        'Recherche instantanée sur Vinted\nExemple: `!search adidas t-shirt`',
+        inline=False)
+
+    embed.add_field(name='!aide',
+                    value='Affiche ce message d\'aide',
+                    inline=False)
+
+    await ctx.send(embed=embed)
+
+
+if __name__ == '__main__':
+    if not TOKEN:
+        print('Error: DISCORD_BOT_TOKEN not found in environment variables')
+        print('Please create a .env file with your Discord bot token')
+    else:
+        bot.run(TOKEN)
